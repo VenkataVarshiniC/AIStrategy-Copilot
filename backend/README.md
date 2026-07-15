@@ -33,7 +33,7 @@ app/
 │   ├── financial_analysis.py   # Margins, NPV, payback, breakeven
 │   └── sensitivity.py          # One-way sensitivity, scenario tables
 ├── llm/
-│   └── ollama_client.py        # Single point of contact with the local model (Ollama)
+│   └── groq_client.py           # Single point of contact with Groq's API
 └── models/
     └── schemas.py              # Pydantic contracts shared end-to-end
 ```
@@ -61,36 +61,36 @@ AnalysisResponse
 
 ## Setup
 
-**1. Install Ollama and pull a model** (one-time, no account/API key needed):
+**1. Get a free Groq API key** (no credit card required):
 
-```bash
-# Install from https://ollama.com/download, then:
-ollama pull llama3.1
-```
-
-Ollama runs a local server on `http://localhost:11434` automatically after install —
-nothing else to configure. Bigger/better models (if your machine can handle them):
-`ollama pull llama3.1:70b` or `ollama pull mistral-nemo`, then set `OLLAMA_MODEL`
-in `.env` to match.
+1. Sign up at [console.groq.com](https://console.groq.com)
+2. Go to **Settings → API Keys → Create API Key**
+3. Copy the key (starts with `gsk_...`)
 
 **2. Run the backend:**
 
 ```bash
-cp .env.example .env          # defaults already point at localhost:11434
+cp .env .env          # then paste your key into GROQ_API_KEY
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-Or with Docker (note: Ollama itself still runs on your host machine, not in the container —
-use `OLLAMA_BASE_URL=http://host.docker.internal:11434` in `.env` if running the backend via Docker):
+Or with Docker:
 
 ```bash
 docker compose up --build
 ```
 
 API docs (Swagger) at `http://localhost:8000/docs`. Check `http://localhost:8000/api/health/`
-first — it reports whether Ollama is reachable and whether the configured model is pulled.
+first — it reports whether the Groq API key is valid and reachable.
+
+**Free tier limits** (as of mid-2026, subject to change — check
+[console.groq.com/settings/limits](https://console.groq.com/settings/limits)):
+`llama-3.3-70b-versatile` (the default, best quality) is capped around 30 requests/min and
+1,000 requests/day on the free tier — plenty for development and demos. If you hit the limit,
+`llama-3.1-8b-instant` has a much higher daily cap (14,400/day) at the cost of somewhat weaker
+structured reasoning — swap `GROQ_MODEL` in `.env` if needed.
 
 ## Typical workflow
 
@@ -114,43 +114,79 @@ curl -X POST localhost:8000/api/analysis/run \
 ## Design principles baked into the code
 
 - **Never fabricate confidence.** `hypothesis_testing.py` explicitly instructs the model to
-  mark a branch `inconclusive` rather than invent support when evidence is sparse.
+  mark a branch `inconclusive` rather than invent support when evidence is sparse, and
+  `confidence_utils.py` robustly parses whatever confidence format the model returns
+  (percent-scale, string, word-scale) instead of crashing on anything but a clean float.
+- **Technical failures are never disguised as findings.** A Groq rate limit, auth error, or
+  connection failure is NOT the same thing as a genuine evidence-based "inconclusive" —
+  the former is a bug/limit, the latter is a legitimate analytical outcome. `hypothesis_testing.py`
+  and `synthesis.py` tag technical failures distinctly (so_what explicitly says so) and surface
+  them in `AnalysisResponse.warnings`, so you can always tell the two apart.
+- **Requests are throttled on purpose.** The pipeline fires 6+ sequential Groq calls per
+  analysis run. `orchestrator.py` paces them with `GROQ_REQUEST_DELAY_SECONDS` (default 1.5s)
+  to stay under the free tier's tokens-per-minute budget — this is what prevents "every branch
+  after the first couple silently fails and shows inconclusive," which was the root cause of
+  that exact symptom before this fix.
 - **Every number is traceable.** `quant_router.py` labels all illustrative defaults so
   outputs never silently masquerade as real client data.
 - **Deterministic analytics stay LLM-free.** `analytics/` has zero dependency on the LLM —
   same inputs always produce the same numbers, which is testable and auditable.
-- **One LLM chokepoint.** All model calls go through `llm/ollama_client.py`, so
-  retry/model-swap/timeout logic lives in exactly one place. Swapping to a cloud
-  provider later (or back to Claude) means editing this one file only.
+- **One LLM chokepoint.** All model calls go through `llm/groq_client.py`, so
+  retry/model-swap/timeout logic lives in exactly one place. Swapping providers again
+  later (local Ollama, Claude, OpenAI) means editing this one file only.
+- **JSON truncation doesn't silently break a branch.** `complete_json` attempts to repair
+  malformed/truncated JSON (unbalanced braces, trailing commas) before giving up, since a
+  single dropped brace shouldn't force an otherwise-good finding to `inconclusive`.
+- **Retries honor the server, not a guess.** On a 429, `groq_client.py` reads the `Retry-After`
+  header Groq returns and waits exactly that long, rather than a blind exponential backoff that
+  might not actually clear by the time it retries.
 
 ## Troubleshooting
 
-**"Couldn't reach Ollama at http://localhost:11434"**
+**Every branch comes back "inconclusive" with no/low confidence**
 
-Ollama isn't running. It normally starts automatically after install and stays running
-in the background. If not, start it manually in a separate terminal:
-```bash
-ollama serve
-```
-Then confirm the model is actually pulled (this is a one-time multi-GB download):
-```bash
-ollama list
-ollama pull llama3.1   # if it's not in the list above
-```
+Check `AnalysisResponse.warnings` in the JSON response first — this field exists specifically
+to answer "why." Two distinct causes look identical in the UI but are very different:
 
-**Responses are slow or the model seems to "hang"**
+1. **Empty knowledge base** (most common on a fresh setup): if you haven't called
+   `/api/ingest/urls` or `/api/ingest/pdf` yet, there's no evidence to ground any finding in,
+   and "inconclusive" is the *correct*, honest answer — not a bug. `warnings` will say so
+   explicitly. Ingest something first (see the Typical Workflow section above).
+2. **Groq rate limit hit mid-run**: the pipeline makes 6+ sequential calls per analysis
+   (issue tree + one per branch + synthesis). On the free tier this can burst past the
+   tokens-per-minute budget partway through a single run. `warnings` will list which branch(es)
+   failed and why. If you see this: raise `GROQ_REQUEST_DELAY_SECONDS` in `.env` (try 3-4s),
+   or confirm `GROQ_MODEL=llama-3.1-8b-instant` (much higher free-tier budget than the 70b
+   model), or check your usage at
+   [console.groq.com/settings/limits](https://console.groq.com/settings/limits).
 
-Local models run on your CPU/GPU, not a data center — a single analysis makes several
-sequential LLM calls (issue tree → per-branch judgment ×N → synthesis), so expect it to
-take noticeably longer than a cloud API, especially on a laptop without a dedicated GPU.
-If it's painfully slow, try a smaller model: `ollama pull llama3.1:8b` (this is
-already the default tag) or `ollama pull phi3` for an even lighter option.
+**"GROQ_API_KEY is not set"**
+
+You haven't added a key to `.env` yet. Sign up free at
+[console.groq.com](https://console.groq.com), create a key under Settings → API Keys, and
+set `GROQ_API_KEY=gsk_...` in your `.env` file. Restart uvicorn after editing `.env`.
+
+**"Groq rejected the API key"**
+
+Double-check you copied the full key (starts with `gsk_`) with no extra whitespace, and that
+`.env` is in the `backend/` folder (not a subfolder) so `pydantic-settings` picks it up.
+
+**"Groq free-tier rate limit hit and retries exhausted" (HTTP 429)**
+
+The built-in retry logic already waits out Groq's own `Retry-After` header (up to 5 attempts)
+before raising this — if you're still hitting it, the free tier is genuinely saturated for the
+moment. Wait a minute, raise `GROQ_REQUEST_DELAY_SECONDS` in `.env`, check usage at
+[console.groq.com/settings/limits](https://console.groq.com/settings/limits), or switch
+`GROQ_MODEL` to `llama-3.1-8b-instant` (default), which has a much higher free-tier budget
+than `llama-3.3-70b-versatile`.
 
 **JSON parsing errors from `complete_json`**
 
-Smaller/quantized models occasionally drift from valid JSON even with `format: "json"`
-enabled. If this happens often, switch to a stronger model (`ollama pull mistral-nemo`
-or a larger Llama variant) — JSON reliability scales with model size.
+Rare on Groq's larger models, but if it happens often, `complete_json` already attempts an
+automatic repair (truncated JSON, trailing commas) before raising — check the logs for a
+"recovered via repair" warning vs. a hard failure. If hard failures persist, try switching
+`GROQ_MODEL` to `llama-3.3-70b-versatile` — stronger structured-output reliability, at the
+cost of a tighter free-tier rate limit (see the rate-limit note above).
 
 **Windows: `chroma-hnswlib` fails to build wheel / "Microsoft Visual C++ 14.0 required"**
 
@@ -180,9 +216,9 @@ Python version and falls back to compiling it from C++ source. Fix, in order of 
 pytest
 ```
 
-Covers the deterministic analytics and chunking logic — no Ollama or model download
+Covers the deterministic analytics and chunking logic — no Groq API key or network call
 required. LLM-dependent pipeline stages are best verified via the running API once
-Ollama is installed and a model is pulled.
+`GROQ_API_KEY` is set.
 
 ## Roadmap (post-MVP)
 

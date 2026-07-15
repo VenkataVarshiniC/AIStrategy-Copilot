@@ -11,9 +11,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Local LLM (Ollama) — no API key needed, runs on your own machine
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1"
+    # Groq API — free tier, no credit card. Get a key at https://console.groq.com
+    groq_api_key: str = ""
+    # llama-3.1-8b-instant has a much higher free-tier requests/day and
+    # tokens/minute budget than the 70b model, which matters a lot for this
+    # pipeline (6+ sequential LLM calls per analysis run). Swap to
+    # llama-3.3-70b-versatile for stronger reasoning if you have headroom.
+    groq_model: str = "llama-3.1-8b-instant"
+    # Minimum delay between sequential Groq calls within one analysis run.
+    # The pipeline fires ~6+ calls back to back (issue tree + N branches +
+    # synthesis); without pacing, this can burst past the free tier's
+    # tokens-per-minute cap partway through a single request. This is a
+    # blunt but effective safeguard on top of the retry/backoff in groq_client.
+    groq_request_delay_seconds: float = 1.5
 
     # App
     app_env: str = "development"
@@ -25,8 +35,10 @@ class Settings(BaseSettings):
     embedding_model: str = "all-MiniLM-L6-v2"
     collection_name: str = "strategy_copilot_docs"
 
-    # Retrieval
-    retrieval_top_k: int = 6
+    # Retrieval — kept modest to control per-call token usage against the
+    # free-tier TPM budget (each extra evidence snippet adds prompt tokens
+    # on every single branch's hypothesis-testing call).
+    retrieval_top_k: int = 4
     chunk_size: int = 800
     chunk_overlap: int = 120
 

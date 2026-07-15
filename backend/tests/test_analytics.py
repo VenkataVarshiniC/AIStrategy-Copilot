@@ -2,7 +2,7 @@
 Deterministic unit tests — cover the analytics layer only, since those
 functions have no external dependency (no LLM, no vector store) and should
 be 100% reliable. Orchestrator/LLM-dependent paths are covered separately
-via integration tests that require a running local Ollama server (no API key needed).
+via integration tests that require a valid GROQ_API_KEY to be set.
 """
 from app.analytics.financial_analysis import breakeven_units, npv, payback_period, profitability_ratios
 from app.analytics.market_sizing import cagr, project_forward, tam_sam_som

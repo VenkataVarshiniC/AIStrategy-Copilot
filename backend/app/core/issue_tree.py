@@ -7,7 +7,7 @@ This is the step that most distinguishes this system from a generic
 "chatbot that answers business questions" — it forces structured thinking
 before any evidence is gathered.
 """
-from app.llm.ollama_client import complete_json
+from app.llm.groq_client import complete_json
 from app.models.schemas import IssueBranch, IssueTree
 
 ISSUE_TREE_SYSTEM_PROMPT = """You are a senior McKinsey engagement manager known for
@@ -56,7 +56,7 @@ def generate_issue_tree(
 
     prompt = "\n".join(context_lines)
 
-    data = complete_json(prompt, system=ISSUE_TREE_SYSTEM_PROMPT, max_tokens=2000)
+    data = complete_json(prompt, system=ISSUE_TREE_SYSTEM_PROMPT, max_tokens=1200)
 
     branches = [
         IssueBranch(

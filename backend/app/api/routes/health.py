@@ -17,21 +17,31 @@ def health_check():
         doc_count = None
         vector_store_status = f"error: {e}"
 
-    try:
-        resp = requests.get(f"{settings.ollama_base_url}/api/tags", timeout=3)
-        resp.raise_for_status()
-        pulled_models = [m["name"] for m in resp.json().get("models", [])]
-        ollama_status = "ok" if settings.ollama_model in pulled_models or any(
-            m.startswith(settings.ollama_model) for m in pulled_models
-        ) else f"reachable, but '{settings.ollama_model}' not pulled yet (run: ollama pull {settings.ollama_model})"
-    except requests.exceptions.RequestException:
-        ollama_status = f"unreachable at {settings.ollama_base_url} — is `ollama serve` running?"
+    if not settings.groq_api_key:
+        groq_status = "GROQ_API_KEY not set — get a free key at https://console.groq.com"
+    else:
+        try:
+            resp = requests.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+                timeout=5,
+            )
+            if resp.status_code == 401:
+                groq_status = "API key rejected — double check GROQ_API_KEY"
+            else:
+                resp.raise_for_status()
+                available = [m["id"] for m in resp.json().get("data", [])]
+                groq_status = "ok" if settings.groq_model in available else (
+                    f"reachable, but '{settings.groq_model}' not found in your account's model list"
+                )
+        except requests.exceptions.RequestException as e:
+            groq_status = f"unreachable: {e}"
 
     return {
         "status": "ok",
         "app_env": settings.app_env,
-        "ollama_model": settings.ollama_model,
-        "ollama_status": ollama_status,
+        "groq_model": settings.groq_model,
+        "groq_status": groq_status,
         "vector_store_status": vector_store_status,
         "ingested_chunks": doc_count,
     }

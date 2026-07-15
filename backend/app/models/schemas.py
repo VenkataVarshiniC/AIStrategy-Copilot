@@ -96,4 +96,12 @@ class AnalysisResponse(BaseModel):
     issue_tree: IssueTree
     findings: List[HypothesisFinding]
     recommendation: Recommendation
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Technical issues encountered during this run (e.g. Groq rate limits, an empty "
+            "knowledge base). Distinct from HypothesisStatus.inconclusive, which reflects a "
+            "genuine evidence-based finding, not a failure."
+        ),
+    )
     generated_at: datetime = Field(default_factory=datetime.utcnow)

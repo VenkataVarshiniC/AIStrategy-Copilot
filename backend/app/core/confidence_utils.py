@@ -2,9 +2,9 @@
 Robust confidence-value parsing.
 
 Claude reliably returns confidence as a clean float in [0.0, 1.0] when asked.
-Smaller local models (via Ollama) are less consistent — they'll sometimes
-return "70" or "70%" (percent scale instead of 0-1), a string like "0.8"
-with stray whitespace, or occasionally a word like "high"/"medium"/"low".
+Open-weight models served via Groq (Llama 3.3, etc.) are generally good at this
+too, but can still occasionally return "70" or "70%" (percent scale instead of
+0-1), a string like "0.8" with stray whitespace, or a word like "high"/"medium"/"low".
 
 This parser normalizes all of those into a valid float in [0.0, 1.0] instead
 of letting a raw `float(x)` crash and silently zero out an otherwise-valid
