@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-paper text-ink antialiased;
+    font-feature-settings: "ss01" on, "ss02" on;
+  }
+
+  ::selection {
+    @apply bg-gold/30;
+  }
+
+  *:focus-visible {
+    @apply outline-none ring-2 ring-gold ring-offset-2 ring-offset-paper;
+  }
+}
+
+@layer components {
+  .label-eyebrow {
+    @apply font-mono text-[11px] uppercase tracking-[0.14em] text-slate;
+  }
+
+  .panel {
+    @apply bg-white rounded-sm border border-ink/10 shadow-card;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
