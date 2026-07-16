@@ -1,6 +1,10 @@
 """
 Ingestion endpoints: load source material (URLs or uploaded PDFs) into the
 vector store so the orchestrator has real evidence to retrieve and cite.
+
+Two separate knowledge bases are exposed here:
+  - the primary evidence collection (/urls, /pdf)      -> grounds branch findings
+  - the precedents collection (/precedents/urls)        -> grounds comparable-case analysis
 """
 import shutil
 import tempfile
@@ -8,8 +12,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
+from app.config import settings
 from app.models.schemas import IngestRequest
-from app.rag.ingestion import ingest_pdf, ingest_urls
+from app.rag.ingestion import ingest_pdf, ingest_precedent_urls, ingest_urls
 from app.rag.vector_store import get_vector_store
 from app.utils.logger import logger
 
@@ -42,12 +47,31 @@ async def ingest_pdf_upload(file: UploadFile = File(...)):
     return {"filename": file.filename, "chunks_ingested": n_chunks}
 
 
+@router.post("/precedents/urls")
+def ingest_precedent_url_batch(request: IngestRequest):
+    """Ingest case studies / analogous company situations into the separate
+    precedents collection used by the comparable-case analysis step."""
+    if not request.source_urls:
+        raise HTTPException(status_code=400, detail="source_urls must be a non-empty list")
+    results = ingest_precedent_urls(request.source_urls, extra_metadata=request.tags)
+    return {"ingested": results, "total_chunks": sum(results.values())}
+
+
 @router.get("/status")
 def ingestion_status():
-    return {"total_chunks": get_vector_store().count()}
+    return {
+        "evidence_chunks": get_vector_store().count(),
+        "precedent_chunks": get_vector_store(settings.precedents_collection_name).count(),
+    }
 
 
 @router.delete("/reset")
 def reset_knowledge_base():
     get_vector_store().reset()
-    return {"status": "reset"}
+    return {"status": "reset", "collection": "evidence"}
+
+
+@router.delete("/precedents/reset")
+def reset_precedents():
+    get_vector_store(settings.precedents_collection_name).reset()
+    return {"status": "reset", "collection": "precedents"}

@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.utils.logger import logger
-from app.api.routes import analysis, health, ingestion
+from app.api.routes import analysis, comparison, export, health, ingestion
 
 
 def create_app() -> FastAPI:
@@ -19,9 +19,11 @@ def create_app() -> FastAPI:
         description=(
             "Hypothesis-driven consulting engine: decomposes a business question into a "
             "MECE issue tree, grounds each branch in retrieved evidence (RAG), runs "
-            "quantitative analysis, and synthesizes an answer-first recommendation."
+            "quantitative analysis, red-teams its own recommendation, checks comparable "
+            "precedents, and can compare two strategic options head-to-head — exportable "
+            "as a client-ready slide deck."
         ),
-        version="0.1.0",
+        version="0.2.0",
     )
 
     app.add_middleware(
@@ -35,6 +37,8 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix="/api/health", tags=["health"])
     app.include_router(ingestion.router, prefix="/api/ingest", tags=["ingestion"])
     app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
+    app.include_router(comparison.router, prefix="/api/comparison", tags=["comparison"])
+    app.include_router(export.router, prefix="/api/export", tags=["export"])
 
     @app.on_event("startup")
     async def on_startup():

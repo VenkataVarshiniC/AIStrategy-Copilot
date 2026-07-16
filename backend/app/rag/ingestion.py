@@ -48,7 +48,7 @@ def extract_pdf_text(file_path: str) -> str:
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
-def ingest_text(text: str, source: str, extra_metadata: Dict[str, Any] = None) -> int:
+def ingest_text(text: str, source: str, extra_metadata: Dict[str, Any] = None, collection_name: str = None) -> int:
     extra_metadata = extra_metadata or {}
     chunks = _chunk_text(text)
     ids, docs, metas = [], [], []
@@ -58,16 +58,16 @@ def ingest_text(text: str, source: str, extra_metadata: Dict[str, Any] = None) -
         docs.append(chunk)
         metas.append({"source": source, "chunk_index": i, **extra_metadata})
 
-    store = get_vector_store()
+    store = get_vector_store(collection_name)
     return store.add_documents(ids=ids, texts=docs, metadatas=metas)
 
 
-def ingest_urls(urls: List[str], extra_metadata: Dict[str, Any] = None) -> Dict[str, int]:
+def ingest_urls(urls: List[str], extra_metadata: Dict[str, Any] = None, collection_name: str = None) -> Dict[str, int]:
     results = {}
     for url in urls:
         try:
             text = fetch_url_text(url)
-            n = ingest_text(text, source=url, extra_metadata=extra_metadata)
+            n = ingest_text(text, source=url, extra_metadata=extra_metadata, collection_name=collection_name)
             results[url] = n
             logger.info(f"Ingested {n} chunks from {url}")
         except Exception as e:
@@ -76,6 +76,12 @@ def ingest_urls(urls: List[str], extra_metadata: Dict[str, Any] = None) -> Dict[
     return results
 
 
-def ingest_pdf(file_path: str, source_label: str = None, extra_metadata: Dict[str, Any] = None) -> int:
+def ingest_pdf(file_path: str, source_label: str = None, extra_metadata: Dict[str, Any] = None, collection_name: str = None) -> int:
     text = extract_pdf_text(file_path)
-    return ingest_text(text, source=source_label or file_path, extra_metadata=extra_metadata)
+    return ingest_text(text, source=source_label or file_path, extra_metadata=extra_metadata, collection_name=collection_name)
+
+
+def ingest_precedent_urls(urls: List[str], extra_metadata: Dict[str, Any] = None) -> Dict[str, int]:
+    """Ingests into the separate precedents/case-study collection, kept distinct
+    from the primary evidence collection since they answer different questions."""
+    return ingest_urls(urls, extra_metadata=extra_metadata, collection_name=settings.precedents_collection_name)

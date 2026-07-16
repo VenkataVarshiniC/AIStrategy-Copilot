@@ -30,6 +30,16 @@ class IngestRequest(BaseModel):
     tags: dict = Field(default_factory=dict, description="Metadata tags to attach to ingested chunks")
 
 
+class ComparisonRequest(BaseModel):
+    option_a: str = Field(..., description="First strategic option, e.g. 'Enter SEA directly via a wholly-owned subsidiary'")
+    option_b: str = Field(..., description="Second strategic option, e.g. 'Enter SEA via a joint venture with a local OEM'")
+    decision_context: str = Field(..., description="The shared decision being made, e.g. 'How should Acme enter the SEA EV market?'")
+    company_name: Optional[str] = None
+    industry: Optional[str] = None
+    additional_context: Optional[str] = None
+    max_branches: int = Field(3, ge=2, le=5, description="Branches per option — kept lower since two full analyses run")
+
+
 # ---------------------------------------------------------------------------
 # Core domain objects
 # ---------------------------------------------------------------------------
@@ -91,11 +101,34 @@ class Recommendation(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
 
 
+class RedTeamVerdict(str, Enum):
+    HOLDS = "holds"
+    WEAKENED = "weakened"
+    REVERSED = "reversed"
+
+
+class RedTeamCritique(BaseModel):
+    strongest_objection: str = Field(..., description="The single strongest counter-argument to the recommendation")
+    challenged_assumptions: List[str] = Field(default_factory=list)
+    unresolved_risks: List[str] = Field(default_factory=list)
+    verdict: RedTeamVerdict = Field(..., description="Whether the challenge weakens or reverses the original call")
+    adjusted_confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence after adversarial review")
+
+
+class PrecedentInsight(BaseModel):
+    situation: str = Field(..., description="The analogous historical situation/company found")
+    outcome: str = Field(..., description="What happened in that precedent")
+    implication: str = Field(..., description="What this precedent implies for the current question")
+    source: str
+
+
 class AnalysisResponse(BaseModel):
     request: AnalysisRequest
     issue_tree: IssueTree
     findings: List[HypothesisFinding]
     recommendation: Recommendation
+    red_team: Optional[RedTeamCritique] = None
+    precedents: List[PrecedentInsight] = Field(default_factory=list)
     warnings: List[str] = Field(
         default_factory=list,
         description=(
@@ -104,4 +137,19 @@ class AnalysisResponse(BaseModel):
             "genuine evidence-based finding, not a failure."
         ),
     )
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ComparisonVerdict(BaseModel):
+    winning_option: str = Field(..., description="'option_a', 'option_b', or 'neither/hybrid'")
+    rationale: str
+    key_tradeoffs: List[str]
+    confidence: float = Field(..., ge=0.0, le=1.0)
+
+
+class ComparisonResponse(BaseModel):
+    request: ComparisonRequest
+    option_a_analysis: AnalysisResponse
+    option_b_analysis: AnalysisResponse
+    verdict: ComparisonVerdict
     generated_at: datetime = Field(default_factory=datetime.utcnow)

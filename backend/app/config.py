@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = "./data/chroma"
     embedding_model: str = "all-MiniLM-L6-v2"
     collection_name: str = "strategy_copilot_docs"
+    precedents_collection_name: str = "strategy_copilot_precedents"
 
     # Retrieval — kept modest to control per-call token usage against the
     # free-tier TPM budget (each extra evidence snippet adds prompt tokens

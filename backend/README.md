@@ -7,35 +7,49 @@ Hypothesis-driven consulting engine. Given a business question, it:
 3. **Runs quantitative analysis** where relevant (market sizing, financial ratios, sensitivity)
 4. **Judges** each hypothesis as supported / refuted / inconclusive, strictly grounded in retrieved evidence
 5. **Synthesizes** an answer-first recommendation (Pyramid Principle: headline → support → risks)
+6. **Red-teams** its own recommendation — a separate adversarial pass argues against it, surfaces
+   the strongest objection, and gives an adjusted confidence
+7. **Checks precedents** — optionally pattern-matches the question against ingested case studies
+8. **Exports** the whole analysis as a client-ready PowerPoint deck
+9. **Compares scenarios** — runs two strategic options head-to-head through the full pipeline and
+   produces a comparative verdict
 
 ## Architecture
 
 ```
 app/
-├── main.py                 # FastAPI app factory, route mounting
-├── config.py                # Settings (env-driven)
+├── main.py                    # FastAPI app factory, route mounting
+├── config.py                   # Settings (env-driven)
 ├── api/routes/
-│   ├── health.py            # GET  /api/health
-│   ├── ingestion.py          # POST /api/ingest/urls, /api/ingest/pdf
-│   └── analysis.py           # POST /api/analysis/run   <- main endpoint
-├── core/                     # Orchestration & reasoning
-│   ├── issue_tree.py          # MECE decomposition (LLM)
-│   ├── hypothesis_testing.py  # RAG-grounded evidence judgment (LLM)
-│   ├── quant_router.py        # Routes branch -> analytics function
-│   ├── synthesis.py           # Final recommendation roll-up (LLM)
-│   └── orchestrator.py        # Ties the above into one pipeline
-├── rag/                      # Retrieval-augmented generation
-│   ├── ingestion.py            # URL/PDF scraping + chunking
-│   ├── vector_store.py         # Chroma persistent client
-│   └── retriever.py            # Query -> typed Evidence objects
-├── analytics/                # Deterministic, LLM-free quant functions
-│   ├── market_sizing.py        # TAM/SAM/SOM, CAGR, projections
-│   ├── financial_analysis.py   # Margins, NPV, payback, breakeven
-│   └── sensitivity.py          # One-way sensitivity, scenario tables
+│   ├── health.py                # GET  /api/health
+│   ├── ingestion.py              # POST /api/ingest/urls, /pdf, /precedents/urls
+│   ├── analysis.py               # POST /api/analysis/run       <- main single-option endpoint
+│   ├── comparison.py             # POST /api/comparison/run     <- two-option head-to-head
+│   └── export.py                 # POST /api/export/pptx        <- deck generation
+├── core/                      # Orchestration & reasoning
+│   ├── issue_tree.py            # MECE decomposition (LLM)
+│   ├── hypothesis_testing.py    # RAG-grounded evidence judgment (LLM)
+│   ├── quant_router.py          # Routes branch -> analytics function
+│   ├── synthesis.py             # Final recommendation roll-up (LLM)
+│   ├── red_team.py              # Adversarial challenge of the recommendation (LLM)
+│   ├── precedent_analysis.py    # Comparable-case pattern matching (LLM + RAG)
+│   ├── scenario_comparison.py   # Runs two full analyses + head-to-head verdict
+│   ├── confidence_utils.py      # Robust confidence-value parsing
+│   └── orchestrator.py          # Ties the single-option pipeline together
+├── export/
+│   └── pptx_export.py           # AnalysisResponse -> python-pptx deck (bytes)
+├── rag/                       # Retrieval-augmented generation
+│   ├── ingestion.py              # URL/PDF scraping + chunking (evidence AND precedents)
+│   ├── vector_store.py           # Chroma client, supports multiple named collections
+│   └── retriever.py              # Query -> typed Evidence objects (evidence AND precedents)
+├── analytics/                 # Deterministic, LLM-free quant functions
+│   ├── market_sizing.py         # TAM/SAM/SOM, CAGR, projections
+│   ├── financial_analysis.py    # Margins, NPV, payback, breakeven
+│   └── sensitivity.py           # One-way sensitivity, scenario tables
 ├── llm/
 │   └── groq_client.py           # Single point of contact with Groq's API
 └── models/
-    └── schemas.py              # Pydantic contracts shared end-to-end
+    └── schemas.py               # Pydantic contracts shared end-to-end
 ```
 
 ## Pipeline flow
@@ -46,7 +60,7 @@ AnalysisRequest
       ▼
 generate_issue_tree()  ──▶  IssueTree (restated question + N MECE branches)
       │
-      ▼  (per branch)
+      ▼  (per branch, throttled)
 run_quant_for_branch()  ──▶  QuantResult (or None for qualitative branches)
       │
       ▼
@@ -56,8 +70,17 @@ test_hypothesis()  ──▶  retrieve_evidence() [RAG]  ──▶  HypothesisFi
 synthesize_recommendation()  ──▶  Recommendation (headline, summary, risks)
       │
       ▼
-AnalysisResponse
+run_red_team_review()  ──▶  RedTeamCritique (strongest objection, verdict, adjusted confidence)
+      │
+      ▼
+analyze_precedents()  ──▶  [PrecedentInsight] (optional — only if precedents were ingested)
+      │
+      ▼
+AnalysisResponse  ──▶  optionally: POST /api/export/pptx  ──▶  client-ready deck
 ```
+
+Scenario comparison (`/api/comparison/run`) runs this entire pipeline twice — once per
+option — then adds one more LLM call to produce a head-to-head verdict.
 
 ## Setup
 
@@ -70,7 +93,7 @@ AnalysisResponse
 **2. Run the backend:**
 
 ```bash
-cp .env .env          # then paste your key into GROQ_API_KEY
+cp .env.example .env          # then paste your key into GROQ_API_KEY
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
@@ -87,10 +110,11 @@ first — it reports whether the Groq API key is valid and reachable.
 
 **Free tier limits** (as of mid-2026, subject to change — check
 [console.groq.com/settings/limits](https://console.groq.com/settings/limits)):
-`llama-3.3-70b-versatile` (the default, best quality) is capped around 30 requests/min and
-1,000 requests/day on the free tier — plenty for development and demos. If you hit the limit,
-`llama-3.1-8b-instant` has a much higher daily cap (14,400/day) at the cost of somewhat weaker
-structured reasoning — swap `GROQ_MODEL` in `.env` if needed.
+the default `llama-3.1-8b-instant` has a much higher free-tier request/token budget than
+`llama-3.3-70b-versatile`, which matters a lot now — a single analysis run makes **8+
+sequential calls** (issue tree, one per branch, synthesis, red-team, precedents), and
+scenario comparison makes roughly double that. `GROQ_REQUEST_DELAY_SECONDS` (default 1.5s)
+paces these automatically; raise it if you still see rate-limit warnings.
 
 ## Typical workflow
 
@@ -100,7 +124,12 @@ curl -X POST localhost:8000/api/ingest/urls \
   -H "Content-Type: application/json" \
   -d '{"source_urls": ["https://example.com/market-report"], "tags": {"sector": "EV"}}'
 
-# 2. Run the full analysis
+# 1b. Optional: ingest comparable case studies for precedent analysis
+curl -X POST localhost:8000/api/ingest/precedents/urls \
+  -H "Content-Type: application/json" \
+  -d '{"source_urls": ["https://example.com/similar-market-entry-case-study"]}'
+
+# 2. Run the full analysis (now includes red_team + precedents in the response)
 curl -X POST localhost:8000/api/analysis/run \
   -H "Content-Type: application/json" \
   -d '{
@@ -108,8 +137,27 @@ curl -X POST localhost:8000/api/analysis/run \
         "company_name": "Acme Motors",
         "industry": "Electric Vehicles",
         "max_branches": 4
+      }' > analysis.json
+
+# 3. Export that analysis as a client-ready slide deck
+curl -X POST localhost:8000/api/export/pptx \
+  -H "Content-Type: application/json" \
+  -d @analysis.json \
+  --output strategy-deck.pptx
+
+# Or, compare two strategic options head-to-head instead of steps 2-3:
+curl -X POST localhost:8000/api/comparison/run \
+  -H "Content-Type: application/json" \
+  -d '{
+        "decision_context": "How should Acme Motors enter the Southeast Asian EV market?",
+        "option_a": "Enter directly via a wholly-owned subsidiary",
+        "option_b": "Enter via a joint venture with a local OEM",
+        "company_name": "Acme Motors",
+        "industry": "Electric Vehicles"
       }'
 ```
+
+
 
 ## Design principles baked into the code
 
@@ -224,6 +272,8 @@ required. LLM-dependent pipeline stages are best verified via the running API on
 
 - Structured parameter extraction from ingested docs to auto-populate `quant_params`
   instead of relying on caller-supplied or default figures
-- Slide/PDF export of `AnalysisResponse` (python-pptx) for a true "consulting deliverable" output
 - Streaming responses so the frontend can render the issue tree as it's generated
 - Auth + per-user knowledge bases
+- PDF export alongside PPTX (same `AnalysisResponse` → different renderer)
+- Multi-round red-team (a rebuttal pass after the initial challenge, mirroring a real back-and-forth)
+- N-way scenario comparison (more than two options) instead of the current pairwise-only mode
