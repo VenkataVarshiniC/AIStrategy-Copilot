@@ -1,38 +1,32 @@
 """
 LLM client — talks to Groq's cloud API instead of a local Ollama server.
 
-Why the switch: Ollama runs inference on your own CPU/GPU, which was adding
-noticeable latency to every request. Groq runs open-weight models (Llama,
-etc.) on custom LPU hardware and is dramatically faster — often 300-1000+
-tokens/second — while still being free for prototyping (rate-limited, no
-credit card required).
-
-IMPORTANT — free tier rate limits: the free tier caps both requests/minute
-and tokens/minute. This pipeline fires several sequential LLM calls per
-analysis run (issue tree, then one call per branch, then synthesis), which
-can burst past the tokens-per-minute budget partway through a single run if
-calls aren't paced. Two things protect against that:
-  1. This module honors the `Retry-After` header Groq returns on a 429 and
-     waits exactly that long before retrying, instead of guessing.
-  2. The orchestrator adds a small fixed delay between calls
-     (settings.groq_request_delay_seconds) to avoid bursting in the first place.
-If you still see rate-limit errors, either raise groq_request_delay_seconds
-in .env or switch GROQ_MODEL to a lighter model with a higher free-tier budget.
-
 Groq's API is OpenAI-compatible, so this is a plain HTTP client against
-https://api.groq.com/openai/v1/chat/completions — no SDK dependency needed.
-Every other module in the pipeline (issue_tree, hypothesis_testing, synthesis)
-still only calls `complete()` / `complete_json()`, so this swap is isolated
-to this one file.
+https://api.groq.com/openai/v1/chat/completions. Every other module in the
+pipeline only calls `complete()` / `complete_json()`.
+
+Efficiency layers in this file:
+  1. Bounded concurrency (_concurrency_gate) — independent calls (e.g. per-branch
+     hypothesis tests) run in parallel instead of one at a time, capped against
+     the free tier's TPM budget.
+  2. Pooled HTTP connections (_session) — no repeated TCP/TLS handshake per call.
+  3. Retry-After-aware backoff on 429s instead of blind exponential guessing.
+  4. In-memory response cache (_response_cache) — identical requests (same
+     prompt/system/model/params) are served from cache instead of re-hitting
+     Groq, which matters a lot during iterative dev/demo re-runs of the same
+     question.
 
 Setup (one-time, no credit card):
     1. Sign up at https://console.groq.com
     2. Create an API key under Settings -> API Keys
     3. Set GROQ_API_KEY in your .env file
 """
+import hashlib
 import json
 import re
+import threading
 import time
+from collections import OrderedDict
 from typing import Any, Optional
 
 import requests
@@ -44,6 +38,50 @@ GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 MAX_ATTEMPTS = 5
 DEFAULT_RATE_LIMIT_WAIT_SECONDS = 8.0
 DEFAULT_CONNECTION_RETRY_WAIT_SECONDS = 3.0
+
+_concurrency_gate = threading.Semaphore(settings.groq_max_concurrent_requests)
+
+_session = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=settings.groq_max_concurrent_requests,
+    pool_maxsize=settings.groq_max_concurrent_requests,
+)
+_session.mount("https://", _adapter)
+
+_response_cache: "OrderedDict[str, str]" = OrderedDict()
+_cache_lock = threading.Lock()
+
+
+def _cache_key(messages: list, max_tokens: int, temperature: float, force_json: bool) -> str:
+    payload = {
+        "model": settings.groq_model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "force_json": force_json,
+    }
+    blob = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _cache_get(key: str) -> Optional[str]:
+    if not settings.groq_cache_enabled:
+        return None
+    with _cache_lock:
+        if key in _response_cache:
+            _response_cache.move_to_end(key)
+            return _response_cache[key]
+    return None
+
+
+def _cache_set(key: str, value: str) -> None:
+    if not settings.groq_cache_enabled:
+        return
+    with _cache_lock:
+        _response_cache[key] = value
+        _response_cache.move_to_end(key)
+        while len(_response_cache) > settings.groq_cache_max_size:
+            _response_cache.popitem(last=False)
 
 
 class GroqAuthError(RuntimeError):
@@ -58,7 +96,7 @@ class GroqConnectionError(RuntimeError):
     """Raised when Groq can't be reached at all after retries (network issue, outage, etc.)."""
 
 
-def _call_groq(messages: list, max_tokens: int, temperature: float, force_json: bool) -> str:
+def _call_groq_impl(messages: list, max_tokens: int, temperature: float, force_json: bool) -> str:
     if not settings.groq_api_key:
         raise GroqAuthError(
             "GROQ_API_KEY is not set. Get a free key at https://console.groq.com "
@@ -83,7 +121,7 @@ def _call_groq(messages: list, max_tokens: int, temperature: float, force_json: 
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            resp = requests.post(GROQ_CHAT_URL, json=payload, headers=headers, timeout=60)
+            resp = _session.post(GROQ_CHAT_URL, json=payload, headers=headers, timeout=60)
         except requests.exceptions.ConnectionError as e:
             last_connection_error = e
             if attempt == MAX_ATTEMPTS:
@@ -95,8 +133,6 @@ def _call_groq(messages: list, max_tokens: int, temperature: float, force_json: 
             time.sleep(wait)
             continue
 
-        # Fail fast on auth errors — retrying a bad key wastes time and
-        # burns rate-limit budget on requests that can never succeed.
         if resp.status_code == 401:
             raise GroqAuthError("Groq rejected the API key — double check GROQ_API_KEY in your .env file.")
 
@@ -105,9 +141,8 @@ def _call_groq(messages: list, max_tokens: int, temperature: float, force_json: 
             if attempt == MAX_ATTEMPTS:
                 raise GroqRateLimitError(
                     f"Groq free-tier rate limit hit and retries exhausted (waited up to {retry_after:.0f}s "
-                    "each time). This usually means the pipeline's sequential calls burst past the "
-                    "tokens-per-minute budget for this model. Try raising GROQ_REQUEST_DELAY_SECONDS in "
-                    ".env, switching to a lighter GROQ_MODEL, or simply waiting a minute and retrying. "
+                    "each time). Try raising GROQ_REQUEST_DELAY_SECONDS in .env, switching to a lighter "
+                    "GROQ_MODEL, or waiting a minute and retrying. "
                     "See https://console.groq.com/settings/limits for your current usage."
                 )
             logger.warning(
@@ -130,9 +165,24 @@ def _call_groq(messages: list, max_tokens: int, temperature: float, force_json: 
 
         return choice["message"]["content"]
 
-    # Should be unreachable — every branch above either returns or raises —
-    # but keep a clear error rather than an implicit `None` if it ever isn't.
     raise GroqConnectionError(f"Groq request failed after {MAX_ATTEMPTS} attempts: {last_connection_error}")
+
+
+def _call_groq(messages: list, max_tokens: int, temperature: float, force_json: bool) -> str:
+    """Public entrypoint: checks the response cache first, then gates actual
+    calls through a bounded semaphore so independent calls can run in
+    parallel while still capping burst size against the free tier's TPM budget."""
+    key = _cache_key(messages, max_tokens, temperature, force_json)
+    cached = _cache_get(key)
+    if cached is not None:
+        logger.info("Groq response cache hit — skipped a live API call")
+        return cached
+
+    with _concurrency_gate:
+        result = _call_groq_impl(messages, max_tokens, temperature, force_json)
+
+    _cache_set(key, result)
+    return result
 
 
 def complete(

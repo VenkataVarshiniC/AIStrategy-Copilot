@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # tokens-per-minute cap partway through a single request. This is a
     # blunt but effective safeguard on top of the retry/backoff in groq_client.
     groq_request_delay_seconds: float = 1.5
+    # How many Groq requests can be in flight at once — bounds burst size
+    # when independent calls (e.g. branches) run concurrently instead of sequentially.
+    groq_max_concurrent_requests: int = 3
+    groq_cache_enabled: bool = True
+    groq_cache_max_size: int = 200
 
     # App
     app_env: str = "development"
